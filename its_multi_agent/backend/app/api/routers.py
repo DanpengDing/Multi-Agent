@@ -1,81 +1,140 @@
+from agents.run import Runner
 from fastapi.routing import APIRouter
 from starlette.responses import StreamingResponse
 
-from schemas.request import ChatMessageRequest, UserSessionsRequest
-from services.agent_service import MultiAgentService
 from infrastructure.logging.logger import logger
+from multi_agent.orchestrator_agent import orchestrator_agent
+from schemas.request import ChatMessageRequest, HumanApprovalRequest, UserSessionsRequest
+from schemas.response import ContentKind
+from services.agent_service import MultiAgentService
+from services.hitl_service import hitl_service
 from services.session_service import session_service
+from services.structured_output_service import structured_output_service
+from utils.response_util import ResponseFactory
 
-# 1. 定义请求路由器
 router = APIRouter()
 
 
-# 2. 定义对话请求
-@router.post("/api/query", summary="智能体对话接口")
+@router.post("/api/query", summary="流式执行智能体")
 async def query(request_context: ChatMessageRequest) -> StreamingResponse:
-    """
-    SSE返回数据（流式响应）
-    响应头中：text/event-stream
-    Args:
-        request_context: 请求上下文
-
-    Returns:
-        StreamingResponse
-
-    """
-
-    # 1. 获取请求上下文的属性
     user_id = request_context.context.user_id
     user_query = request_context.query
-    print(request_context.flag)
-    logger.info(f"用户 {user_id} 发送的待处理任务 {user_query}")
-
-    # 2. 调用AgentService（智能体的业务服务类）
+    logger.info("user=%s query=%s", user_id, user_query)
     async_generator_result = MultiAgentService.process_task(request_context, flag=True)
-
-    # 3. 封装结果到StreamingResponse中
     return StreamingResponse(
         content=async_generator_result,
         status_code=200,
-        media_type="text/event-stream"
+        media_type="text/event-stream",
+    )
+
+
+@router.post("/api/human_approval", summary="处理审批结果并恢复同一条 run")
+async def human_approval(request: HumanApprovalRequest) -> StreamingResponse:
+    # 这里不是重新构造一轮新的用户提问，
+    # 而是拿回之前保存在 hitl_service 中的 pending approval，
+    # 从同一条 run 的暂停点继续恢复。
+    approval = hitl_service.resolve_pending_approval(
+        token=request.approval_token,
+        user_id=request.context.user_id,
+        session_id=request.context.session_id or "",
+        decision=request.decision,
+    )
+
+    async def approval_stream():
+        if approval.decision == "rejected":
+            # 拒绝时不再继续恢复 run，直接结束本轮流程。
+            hitl_service.consume_approval(approval.token)
+            yield "data: " + ResponseFactory.build_text(
+                "你已拒绝此次敏感操作，本轮流程已停止。",
+                ContentKind.PROCESS,
+            ).model_dump_json() + "\n\n"
+            yield "data: " + ResponseFactory.build_finish().model_dump_json() + "\n\n"
+            return
+
+        try:
+            # 这是官方文档里的恢复方式：
+            # 1. 从之前保存的 state 中逐个 approve interruption
+            # 2. 再把 state 重新交给 Runner.run(...)
+            # 这样恢复的是“同一条 run”，不是重新向 Agent 发起新提问。
+            if approval.state is None:
+                raise ValueError("审批状态丢失，无法恢复运行")
+
+            for interruption in approval.interruptions:
+                approval.state.approve(interruption)
+
+            result = await Runner.run(orchestrator_agent, approval.state)
+            interruptions = list(getattr(result, "interruptions", None) or [])
+            if interruptions:
+                to_state = getattr(result, "to_state", None)
+                next_state = to_state() if callable(to_state) else getattr(result, "state", None)
+                next_pending = hitl_service.create_pending_approval(
+                    user_id=request.context.user_id,
+                    session_id=request.context.session_id or "",
+                    query=approval.query,
+                    state=next_state,
+                    interruptions=interruptions,
+                    title="需要人工确认",
+                    question="是否允许智能体继续执行下一步敏感操作？",
+                    details=f"继续执行请求：{approval.query}",
+                    approve_label="继续",
+                    reject_label="取消",
+                )
+                logger.info(
+                    "[Approval] resumed run created next interruption token=%s count=%d",
+                    next_pending.token,
+                    len(interruptions),
+                )
+                yield "data: " + ResponseFactory.build_human_approval(
+                    token=next_pending.token,
+                    title=next_pending.title,
+                    question=next_pending.question,
+                    details=next_pending.details,
+                    approve_label=next_pending.approve_label,
+                    reject_label=next_pending.reject_label,
+                ).model_dump_json() + "\n\n"
+                yield "data: " + ResponseFactory.build_finish().model_dump_json() + "\n\n"
+                return
+
+            final_output = result.final_output or ""
+            structured_output = structured_output_service.parse_final_output(final_output)
+            logger.info(
+                "[Approval] resumed run token=%s final_output=%s structured_intent=%s",
+                approval.token,
+                final_output[:1000],
+                structured_output.intent,
+            )
+            yield "data: " + ResponseFactory.build_text(
+                structured_output.answer,
+                ContentKind.ANSWER,
+            ).model_dump_json() + "\n\n"
+        finally:
+            hitl_service.consume_approval(approval.token)
+
+        yield "data: " + ResponseFactory.build_finish().model_dump_json() + "\n\n"
+
+    return StreamingResponse(
+        content=approval_stream(),
+        status_code=200,
+        media_type="text/event-stream",
     )
 
 
 @router.post("/api/user_sessions")
 def get_user_sessions(request: UserSessionsRequest):
-    """
-    获取用户的所有会话记忆数据。
-
-    Args:
-        request: 包含 user_id 的请求体。
-
-    Returns:
-        包含用户所有会话信息和记忆的 JSON 响应。
-    """
-    # 1. 日志记录：记录请求到达
-    logger.info("接收到获取用户会话请求")
-
-    # 2. 参数提取：从请求模型中获取目标用户ID
     user_id = request.user_id
-    logger.info(f"获取用户 {user_id} 的所有会话记忆数据")
-
+    logger.info("fetch sessions for user=%s", user_id)
     try:
-        # 3. 服务调用 session_service 从底层存储检索所有历史会话
-        all_sessions =session_service.get_all_sessions_memory(user_id)
-        logger.debug(f"成功获取用户 {user_id} 的 {len(all_sessions)} 个会话")
-
-        # 4. 响应构建：组装并返回标准化的成功 JSON 数据
+        all_sessions = session_service.get_all_sessions_memory(user_id)
         return {
             "success": True,
             "user_id": user_id,
             "total_sessions": len(all_sessions),
-            "sessions": all_sessions
+            "sessions": all_sessions,
         }
-    except Exception as e:
-        # 5. 异常处理：捕获服务层抛出的未知错误，记录日志并返回错误标识
-        logger.error(f"获取用户 {user_id} 的会话数据时出错: {str(e)}")
+    except Exception as exc:
+        logger.error("fetch sessions failed user=%s error=%s", user_id, exc)
         return {
             "success": False,
             "user_id": user_id,
-            "error": str(e)
+            "error": str(exc),
         }

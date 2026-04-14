@@ -1,4 +1,4 @@
-from setuptools import setup, find_packages
+﻿from setuptools import setup, find_packages
 
 setup(
     name="knowledge",
@@ -19,6 +19,7 @@ setup(
         "jieba",
         "unstructured",
         "markdown",
-        "python-multipart"
+        "python-multipart",
+        "mcp",
     ],
 )

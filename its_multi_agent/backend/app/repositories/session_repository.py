@@ -35,7 +35,7 @@ class SessionRepository:
 
     def load_session(
             self, user_id: str, session_id: str
-    ) -> Optional[List[Dict[str, Any]]]:
+    ) -> Optional[Union[List[Dict[str, Any]], Dict[str, Any]]]:
         """从文件加载会话数据。
 
         Args:
@@ -58,7 +58,7 @@ class SessionRepository:
             return json.load(f)
 
     def save_session(
-            self, user_id: str, session_id: str, data: List[Dict[str, Any]]
+            self, user_id: str, session_id: str, data: Union[List[Dict[str, Any]], Dict[str, Any]]
     ) -> None:
         """保存会话数据到文件。
 
