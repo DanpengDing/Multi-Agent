@@ -64,3 +64,12 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# Docker
+.docker/
+
+# GitHub Actions
+.github/workflows/*.local.yml
+
+# Environment files (keep .env.docker as example)
+!.env.docker

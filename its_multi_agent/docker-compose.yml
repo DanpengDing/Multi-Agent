@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  # 后端 API 服务
+  backend:
+    build:
+      context: ./backend/app
+      dockerfile: Dockerfile
+    container_name: multi-agent-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - SF_API_KEY=${SF_API_KEY}
+      - SF_BASE_URL=${SF_BASE_URL}
+      - AL_BAILIAN_API_KEY=${AL_BAILIAN_API_KEY}
+      - AL_BAILIAN_BASE_URL=${AL_BAILIAN_BASE_URL}
+      - MYSQL_HOST=${MYSQL_HOST:-localhost}
+      - MYSQL_PORT=${MYSQL_PORT:-3306}
+      - MYSQL_USER=${MYSQL_USER:-root}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      - MYSQL_DATABASE=${MYSQL_DATABASE:-multi_agent_db}
+    volumes:
+      - ./backend/app/logs:/app/logs
+    restart: unless-stopped
+
+  # 前端 Web 服务
+  frontend:
+    build:
+      context: ./front/agent_web_ui
+      dockerfile: Dockerfile
+    container_name: multi-agent-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    restart: unless-stopped

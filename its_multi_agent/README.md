@@ -105,6 +105,43 @@ npm install
 npm run dev
 ```
 
+## Docker 部署
+
+### 环境要求
+
+- Docker
+- Docker Compose
+
+### 快速启动
+
+1. 复制环境变量配置文件：
+```bash
+cp .env.docker .env
+# 编辑 .env 填入你的 API Key 等配置
+```
+
+2. 启动所有服务：
+```bash
+docker-compose up -d
+```
+
+3. 访问服务：
+- 前端：http://localhost
+- 后端 API：http://localhost:8000
+- API 文档：http://localhost:8000/docs
+
+### 停止服务
+
+```bash
+docker-compose down
+```
+
+### 查看日志
+
+```bash
+docker-compose logs -f
+```
+
 ## License
 
 MIT License

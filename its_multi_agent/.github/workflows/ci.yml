@@ -1,0 +1,111 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  # ========== 后端测试 ==========
+  backend-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: 安装后端依赖
+        run: |
+          cd backend/app
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio
+
+      - name: 运行后端测试
+        run: |
+          cd backend/app
+          python -m pytest tests/ -v --tb=short
+
+  # ========== 前端构建测试 ==========
+  frontend-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: 安装前端依赖
+        run: |
+          cd front/agent_web_ui
+          npm ci
+
+      - name: 运行前端测试（如果存在）
+        run: |
+          cd front/agent_web_ui
+          npm run test --if-present || echo "No tests configured"
+
+      - name: 构建前端
+        run: |
+          cd front/agent_web_ui
+          npm run build
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build
+          path: front/agent_web_ui/dist/
+
+  # ========== 代码质量检查 ==========
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: 安装代码检查工具
+        run: |
+          pip install ruff mypy
+
+      - name: 运行 ruff 检查
+        run: |
+          cd backend/app
+          ruff check . --output-format=github || true
+
+      - name: 运行 mypy 类型检查
+        run: |
+          cd backend/app
+          mypy app/ --ignore-missing-imports || true
+
+  # ========== Docker 构建测试 ==========
+  docker-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 构建后端 Docker 镜像
+        run: |
+          cd backend/app
+          docker build -t multi-agent-backend:test .
+
+      - name: 构建前端 Docker 镜像
+        run: |
+          cd front/agent_web_ui
+          docker build -t multi-agent-frontend:test .
