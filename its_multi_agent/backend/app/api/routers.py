@@ -1,12 +1,14 @@
 from agents.run import Runner
 from fastapi.routing import APIRouter
 from starlette.responses import StreamingResponse
+from typing import AsyncGenerator
 
 from infrastructure.logging.logger import logger
 from multi_agent.orchestrator_agent import orchestrator_agent
 from schemas.request import ChatMessageRequest, HumanApprovalRequest, UserSessionsRequest
 from schemas.response import ContentKind
 from services.agent_service import MultiAgentService
+from services.guardrail_service import guardrail_service
 from services.hitl_service import hitl_service
 from services.session_service import session_service
 from services.structured_output_service import structured_output_service
@@ -19,6 +21,27 @@ router = APIRouter()
 async def query(request_context: ChatMessageRequest) -> StreamingResponse:
     user_id = request_context.context.user_id
     user_query = request_context.query
+
+    # ========== Guardrail 输入过滤 ==========
+    check_result = guardrail_service.check_input(user_query)
+    if check_result.blocked:
+        # 命中通用敏感词，直接拒绝
+        return StreamingResponse(
+            content=_blocked_stream(check_result),
+            status_code=200,
+            media_type="text/event-stream",
+        )
+    if check_result.replaced:
+        # 命中业务敏感词，使用替换后的文本
+        user_query = check_result.filtered_text
+        logger.info(
+            "Guardrail: user=%s business_words=%s replaced_query=%s",
+            user_id,
+            check_result.matched_business,
+            user_query,
+        )
+    # ========== Guardrail 过滤结束 ==========
+
     logger.info("user=%s query=%s", user_id, user_query)
     async_generator_result = MultiAgentService.process_task(request_context, flag=True)
     return StreamingResponse(
@@ -26,6 +49,15 @@ async def query(request_context: ChatMessageRequest) -> StreamingResponse:
         status_code=200,
         media_type="text/event-stream",
     )
+
+
+async def _blocked_stream(check_result) -> AsyncGenerator[str, None]:
+    """返回敏感词拦截响应。"""
+    yield "data: " + ResponseFactory.build_text(
+        f"抱歉，您的输入包含敏感词（{', '.join(check_result.matched_common)}），已被系统拦截。",
+        ContentKind.PROCESS,
+    ).model_dump_json() + "\n\n"
+    yield "data: " + ResponseFactory.build_finish().model_dump_json() + "\n\n"
 
 
 @router.post("/api/human_approval", summary="处理审批结果并恢复同一条 run")
