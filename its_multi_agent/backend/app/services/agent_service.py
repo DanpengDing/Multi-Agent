@@ -34,7 +34,7 @@ class MultiAgentService:
 
     @staticmethod
     def _extract_state(result):
-        # 官方文档推荐用 result.to_state() 获取“可恢复的 run 状态”。
+        # 官方文档推荐用 result.to_state() 获取可恢复的 run 状态。
         # 某些版本也可能直接暴露 result.state，所以这里做一层兼容包装。
         to_state = getattr(result, "to_state", None)
         if callable(to_state):
@@ -43,18 +43,18 @@ class MultiAgentService:
 
     @classmethod
     async def process_task(cls, request: ChatMessageRequest, flag: bool) -> AsyncGenerator[str, None]:
-        # flag 不是业务参数，而是”本次调用是否还允许自动重试一次”的开关。
+        # flag 不是业务参数，而是本次调用是否还允许自动重试一次的开关。
         # 第一次从 /api/query 进入时，外层会传 flag=True，表示如果本轮中途抛异常，可以再自动补跑一次。
         # 一旦进入补跑分支，下面会把 flag 改成 False 再调用自己，这样第二次如果还失败，就不会继续无限递归。
-        tracer = get_tracer(“multi-agent-service”)
+        tracer = get_tracer("multi-agent-service")
         user_id = request.context.user_id
-        session_id = request.context.session_id or “”
+        session_id = request.context.session_id or ""
         original_query = request.query
         user_query = original_query
 
         try:
             logger.info(
-                “[AgentService] start user=%s session=%s retry=%s skip_user_message=%s query=%s”,
+                "[AgentService] start user=%s session=%s retry=%s skip_user_message=%s query=%s",
                 user_id,
                 session_id,
                 flag,
@@ -63,14 +63,14 @@ class MultiAgentService:
             )
 
             # 第 1 步：先加载历史消息，再做 query rewrite。
-            # 这里的 rewrite 不是审批逻辑的一部分，只是让主调度智能体拿到更完整的”当前问题”。
+            # 这里的 rewrite 不是审批逻辑的一部分，只是让主调度智能体拿到更完整的当前问题。
             with tracer.start_as_current_span(
-                “query_rewrite”,
+                "query_rewrite",
                 kind=SpanKind.INTERNAL,
                 attributes={
-                    “user.id”: user_id,
-                    “session.id”: session_id,
-                    “query.original”: original_query,
+                    "user.id": user_id,
+                    "session.id": session_id,
+                    "query.original": original_query,
                 }
             ) as span:
                 runtime_state = await session_service.load_runtime_state(
@@ -81,10 +81,10 @@ class MultiAgentService:
                 base_history = session_service.build_runtime_history(runtime_state, append_user_message=False)
                 rewrite_result = await query_rewrite_service.rewrite(original_query, base_history)
                 user_query = rewrite_result.rewritten_query
-                span.set_attribute(“query.rewritten”, user_query)
-                span.set_attribute(“query.history_length”, len(base_history))
+                span.set_attribute("query.rewritten", user_query)
+                span.set_attribute("query.history_length", len(base_history))
                 logger.info(
-                    “[AgentService] query rewritten user=%s session=%s original=%s rewritten=%s”,
+                    "[AgentService] query rewritten user=%s session=%s original=%s rewritten=%s",
                     user_id,
                     session_id,
                     original_query,
@@ -92,7 +92,7 @@ class MultiAgentService:
                 )
 
             # 第 2 步：把最终 rewrite 后的 query 放入会话历史。
-            # 这样主调度智能体拿到的是“本轮真正要处理的问题”。
+            # 这样主调度智能体拿到的是"本轮真正要处理的问题"。
             chat_history = session_service.build_runtime_history(
                 runtime_state,
                 user_input=user_query,
@@ -207,35 +207,35 @@ class MultiAgentService:
             yield "data: " + ResponseFactory.build_finish().model_dump_json() + "\n\n"
 
         except Exception as exc:
-            # 这里捕获的是”整条 process_task 链路”里的异常，
+            # 这里捕获的是"整条 process_task 链路"里的异常，
             # 比如 query rewrite、主 Agent 执行、流式事件处理等任一步骤抛错，都会进入这里。
             logger.error(
-                “[AgentService] failed user=%s session=%s query=%s error=%s”,
+                "[AgentService] failed user=%s session=%s query=%s error=%s",
                 user_id,
                 session_id,
                 original_query,
                 exc,
             )
-            logger.debug(“[AgentService] traceback=%s”, traceback.format_exc())
+            logger.debug("[AgentService] traceback=%s", traceback.format_exc())
 
             # 记录异常到链路追踪
             span = trace.get_current_span()
             span.record_exception(exc)
             span.set_status(trace.Status(trace.StatusCode.ERROR, str(exc)))
 
-            text = f”系统处理请求时出现异常：{exc}”
-            yield “data: “ + ResponseFactory.build_text(text, ContentKind.PROCESS).model_dump_json() + “\n\n”
+            text = f"系统处理请求时出现异常：{exc}"
+            yield "data: " + ResponseFactory.build_text(text, ContentKind.PROCESS).model_dump_json() + "\n\n"
 
             if flag:
                 # 第一次失败时会进入这里。
-                # 做法不是“只重试失败的那个工具”，而是重新调用整个 process_task，
+                # 做法不是"只重试失败的那个工具"，而是重新调用整个 process_task，
                 # 让本轮请求从头再走一遍：
                 # 1. 重新加载会话历史
                 # 2. 重新做 query rewrite
                 # 3. 重新执行 orchestrator Agent
                 # 4. 重新处理流式输出和 HITL 中断
                 #
-                # 之所以看起来像“递归重试”，是因为当前函数再次调用了自己：
+                # 之所以看起来像"递归重试"，是因为当前函数再次调用了自己：
                 # async for item in MultiAgentService.process_task(request, flag=False)
                 #
                 # 关键点在于第二次调用时 flag=False，
@@ -252,7 +252,7 @@ class MultiAgentService:
                 async for item in MultiAgentService.process_task(request, flag=False):
                     yield item
             else:
-                # 走到这里，说明当前已经是“补跑后的第二轮”了，或者外部本来就不允许重试。
+                # 走到这里，说明当前已经是"补跑后的第二轮"了，或者外部本来就不允许重试。
                 # 这时不再继续递归，而是直接给前端发送 finish，结束本次请求。
                 yield "data: " + ResponseFactory.build_finish().model_dump_json() + "\n\n"
 
