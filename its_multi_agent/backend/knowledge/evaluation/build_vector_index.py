@@ -1,16 +1,21 @@
 import json
 import shutil
+import sys
 from datetime import datetime
 from pathlib import Path
 
 from tqdm import tqdm
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from config.settings import settings
 from repositories.vector_store_repository import VectorStoreRepository
 from services.ingestion.ingestion_processor import IngestionProcessor
 
 
-KNOWLEDGE_ROOT = Path(__file__).resolve().parents[1]
+KNOWLEDGE_ROOT = PROJECT_ROOT
 CRAWL_DIR = Path(settings.CRAWL_OUTPUT_DIR)
 VECTOR_STORE_DIR = Path(settings.VECTOR_STORE_PATH)
 OUTPUT_DIR = KNOWLEDGE_ROOT / "eval_outputs" / "build_index"
@@ -25,7 +30,7 @@ def build_vector_index() -> dict:
 
     vector_store = VectorStoreRepository(
         persist_directory=str(VECTOR_STORE_DIR),
-        collection_name="its-knowledge",
+        collection_name="multi-agent-knowledge",
     )
     ingestion_processor = IngestionProcessor(vector_store=vector_store)
 

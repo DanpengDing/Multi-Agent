@@ -1,4 +1,4 @@
-# ITS Multi-Agent 智能问答后端
+# 售后多智能体（Multi-Agent）智能问答后端
 
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green.svg)](https://fastapi.tiangolo.com/)

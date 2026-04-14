@@ -36,7 +36,7 @@ async def lifespan(app: FastAPI):
 
 def create_fast_api() -> FastAPI:
     # 1. 创建FastApi实例,绑定了生命周期事件
-    app = FastAPI(title="ITS API", lifespan=lifespan)
+    app = FastAPI(title="Multi-Agent API", lifespan=lifespan)
 
     # 2. 处理跨域
     app.add_middleware(

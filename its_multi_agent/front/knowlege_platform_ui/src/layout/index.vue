@@ -1,7 +1,7 @@
 <template>
   <div class="app-wrapper">
     <div class="sidebar">
-      <div class="logo">ITS Knowledge</div>
+      <div class="logo">售后多智能体 Knowledge</div>
       <el-menu
         :default-active="activeMenu"
         background-color="#001529"

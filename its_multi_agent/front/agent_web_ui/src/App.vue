@@ -4,9 +4,9 @@
     <div v-if="!isLoggedIn" class="login-container">
       <div class="login-form">
         <div class="its-logo-flat login-logo">
-            <img src="/its-logo.svg" alt="ITS Logo" width="60" height="60"/>
+            <img src="/its-logo.svg" alt="Multi-Agent Logo" width="60" height="60"/>
           </div>
-        <h1 class="login-title">ITS系统登录</h1>
+        <h1 class="login-title">售后多智能体系统登录</h1>
         <div class="login-input-group">
           <label for="username">用户名</label>
           <input 
@@ -49,17 +49,17 @@
         <div class="sidebar-wrapper">
           <!-- 侧边栏内容 -->
           <div class="sidebar-content" :class="{ 'expanded': isSidebarExpanded }">
-            <!-- 扁平化Logo和ITS标题 -->
+            <!-- 扁平化Logo和Multi-Agent标题 -->
             <div class="app-branding">
               <!-- 扁平风格的Logo -->
               <div class="its-logo-flat">
-                <img src="/its-logo.svg" alt="ITS Logo" width="40" height="40"/>
+                <img src="/its-logo.svg" alt="Multi-Agent Logo" width="40" height="40"/>
               </div>
               
               <!-- 标题 - 仅在展开状态显示 -->
-              <!-- 已注释掉ITS文本显示 -->
+              <!-- 已注释掉Multi-Agent文本显示 -->
               <!-- <div v-show="isSidebarExpanded" class="sidebar-text-content">
-                <h1 class="its-title">ITS</h1>
+                <h1 class="its-title">售后多智能体</h1>
               </div> -->
               
               <!-- 侧边栏展开/收起按钮 - 与logo水平对齐 -->
@@ -217,17 +217,31 @@
               
               <!-- 用户输入框 - 移动到最终结果输出框内 -->
               <div class="input-container">
+                <!-- 收到后端的 HITL 事件后，这里展示人工确认卡片，而不是普通消息气泡。 -->
+                <div v-if="pendingApproval" class="approval-card">
+                  <div class="approval-title">{{ pendingApproval.title }}</div>
+                  <div class="approval-question">{{ pendingApproval.question }}</div>
+                  <div v-if="pendingApproval.details" class="approval-details">{{ pendingApproval.details }}</div>
+                  <div class="approval-actions">
+                    <button class="btn-primary" :disabled="isApprovalSubmitting" @click="handleHumanApproval('approved')">
+                      {{ isApprovalSubmitting ? '处理中...' : (pendingApproval.approveLabel || '确认') }}
+                    </button>
+                    <button class="btn-secondary" :disabled="isApprovalSubmitting" @click="handleHumanApproval('rejected')">
+                      {{ pendingApproval.rejectLabel || '取消' }}
+                    </button>
+                  </div>
+                </div>
                 <div class="textarea-with-button">
                   <textarea
                     v-model="userInput"
                     placeholder="请输入您的请求..."
                     @keyup.enter.exact="handleSend($event)"
-                    :disabled="isProcessing"
+                    :disabled="isProcessing || !!pendingApproval"
                   ></textarea>
                   <button 
                     class="send-button btn-primary"
-                    :class="{ 'cancel-button': isProcessing, 'disabled': !userInput.trim() && !isProcessing }"
-                    :disabled="!userInput.trim() && !isProcessing"
+                    :class="{ 'cancel-button': isProcessing, 'disabled': ((!userInput.trim() && !isProcessing) || !!pendingApproval) }"
+                    :disabled="((!userInput.trim() && !isProcessing) || !!pendingApproval)"
                     @click="isProcessing ? handleCancel() : handleSend()"
                   >
                     {{ isProcessing ? '■' : '发送' }}
@@ -330,6 +344,8 @@ export default {
     let reader = null; // 保存读取器引用，用于取消请求
     
     // 当前选中的导航项
+    const pendingApproval = ref(null);
+    const isApprovalSubmitting = ref(false);
     const selectedNavItem = ref('');
     
 
@@ -551,12 +567,92 @@ const handleServiceStation = () => {
     };
     
     // 处理发送请求
+      const startSSERequest = async (url, requestData) => {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(requestData)
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+
+          if (done) {
+            if (buffer.trim()) {
+              processSSEData(buffer);
+              buffer = '';
+            }
+            break;
+          }
+
+          const chunk = decoder.decode(value, { stream: true });
+          buffer += chunk;
+          const lines = buffer.split('\n');
+
+          for (let i = 0; i < lines.length - 1; i++) {
+            const line = lines[i];
+            if (line.trim()) {
+              processSSEData(line);
+            }
+          }
+
+          buffer = lines[lines.length - 1];
+        }
+      };
+
+      // 用户点确认/取消后，前端通过 approval_token 调 /api/human_approval。
+      // 这样后端能够继续执行“刚才暂停的那一轮”，而不是新开一轮对话。
+      const handleHumanApproval = async (decision) => {
+        if (!pendingApproval.value || isApprovalSubmitting.value) return;
+
+        const userId = localStorage.getItem('currentUserId') || currentUser.value;
+        const approvalToken = pendingApproval.value.token;
+        isApprovalSubmitting.value = true;
+        isProcessing.value = true;
+        pendingApproval.value = null;
+
+        try {
+          await startSSERequest('http://127.0.0.1:8000/api/human_approval', {
+            approval_token: approvalToken,
+            decision,
+            context: {
+              user_id: userId,
+              session_id: selectedSessionId.value || ''
+            }
+          });
+        } catch (error) {
+          if (!error.name || error.name !== 'AbortError') {
+            const errorMsg = `审批处理失败: ${error.message}`;
+            streamTextToProcess(errorMsg + '\n');
+          }
+        } finally {
+          isApprovalSubmitting.value = false;
+          isProcessing.value = false;
+          if (decision === 'rejected') {
+            pendingApproval.value = null;
+          }
+          reader = null;
+          fetchUserSessions();
+          scrollToBottom();
+        }
+      };
+
       const handleSend = async (event) => {
         // 阻止回车键的默认行为（插入换行）
         if (event) {
           event.preventDefault();
         }
-        if (!userInput.value.trim()) return;
+        if (!userInput.value.trim() || pendingApproval.value) return;
         
         // 立即强制滚动到页面顶部，防止页面下移
         window.scrollTo(0, 0);
@@ -703,6 +799,9 @@ const handleServiceStation = () => {
       };
       
       // 处理SSE格式的数据
+    // 统一解析后端 SSE。
+    // 普通事件继续按 THINKING / PROCESS / ANSWER 渲染；
+    // 但 human_approval 事件会转成审批卡片状态，不当作普通文本流处理。
     const processSSEData = (data) => {
       try {
         if (typeof data !== 'string') return;
@@ -724,6 +823,21 @@ const handleServiceStation = () => {
               if (parsedData.content && typeof parsedData.content === 'object') {
                 // 1. 获取文本内容
                 text = parsedData.content.text;
+
+                if (parsedData.content.contentType === 'sagegpt/human_approval') {
+                  // 后端发来这类事件，表示“当前任务已暂停，等待人工确认”。
+                  // 前端只保存 token 和展示文案，真正继续执行要等用户点击按钮。
+                  pendingApproval.value = {
+                    token: parsedData.content.token,
+                    title: parsedData.content.title,
+                    question: parsedData.content.question,
+                    details: parsedData.content.details,
+                    approveLabel: parsedData.content.approveLabel,
+                    rejectLabel: parsedData.content.rejectLabel
+                  };
+                  kind = 'HUMAN_APPROVAL';
+                  text = parsedData.content.question || '';
+                }
 
                 // 2. 获取内容分类 (kind)
                 if (parsedData.content.kind) {
@@ -772,6 +886,14 @@ const handleServiceStation = () => {
                       type: 'PROCESS', // 前端内部状态可以暂时保留叫 type，或者你也想改成 kind？建议暂时不动内部状态
                       text: text
                     }];
+                    scrollToBottom();
+                    break;
+
+                  case 'HUMAN_APPROVAL':
+                    // 进入待审批状态后，当前流式执行到此为止。
+                    // 后续是否继续，取决于用户对审批卡片的操作。
+                    isProcessing.value = false;
+                    reader = null;
                     scrollToBottom();
                     break;
 
@@ -980,7 +1102,10 @@ const handleServiceStation = () => {
       answerText,
       processContent,
       isProcessing,
+      pendingApproval,
+      isApprovalSubmitting,
       handleSend,
+      handleHumanApproval,
       handleCancel,
       renderMarkdown,
       // 历史会话相关
@@ -1617,6 +1742,45 @@ const handleServiceStation = () => {
 .input-container {
   padding: 0;
   margin-top: auto;
+}
+
+.approval-card {
+  max-width: 50vw;
+  margin: 0 0 12px 0;
+  padding: 14px 16px;
+  border: 1px solid #f0c36d;
+  background: #fff8e8;
+  border-radius: 12px;
+}
+
+.approval-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: #7a4b00;
+  margin-bottom: 6px;
+}
+
+.approval-question {
+  font-size: 14px;
+  color: #4a3a17;
+  margin-bottom: 6px;
+}
+
+.approval-details {
+  font-size: 13px;
+  color: #6b5b34;
+  white-space: pre-wrap;
+  margin-bottom: 12px;
+}
+
+.approval-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.btn-secondary {
+  background-color: #e9ecef;
+  color: #333;
 }
 
 .textarea-with-button {

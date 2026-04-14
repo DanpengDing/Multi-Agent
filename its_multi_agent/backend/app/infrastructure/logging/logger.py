@@ -22,7 +22,7 @@ FILE_FORMAT = "%(asctime)s | %(levelname)-8s | %(name)s:%(lineno)d | %(message)s
 CONSOLE_FORMAT = "%(asctime)s | %(levelname)-8s | %(message)s"
 # %(asctime)s:   打印时间 (例如 2026-1-07 10:00:00)
 # %(levelname)-8s: 打印日志级别 (INFO, ERROR等)。-8s 表示左对齐，占8个字符宽度，为了排版整齐。
-# %(name)s:      logger的名字 (这里是 "ITS_App")
+# %(name)s:      logger的名字 (这里是 "MultiAgent_App")
 # %(lineno)d:    打印这行日志是在哪一行代码触发的 (非常便于找 Bug)
 # %(message)s:   你具体打印的内容
 
@@ -60,7 +60,7 @@ class ColoredFormatter(logging.Formatter):
 
 # ================= 初始化 Logger =================
 
-def get_logger(name="ITS_App"):
+def get_logger(name="MultiAgent_App"):
     """
     获取配置好的 Logger 实例
     """

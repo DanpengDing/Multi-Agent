@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-ITS Multi-Agent 智能问答后端服务，基于 FastAPI + OpenAI Agents SDK 构建的多智能体系统。
+售后多智能体（Multi-Agent）智能问答后端服务，基于 FastAPI + OpenAI Agents SDK 构建的多智能体系统。
 
 ## 快速启动
 
