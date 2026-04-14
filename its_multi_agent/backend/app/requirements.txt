@@ -7,3 +7,8 @@ openai
 httpx
 openai-agents
 pystun3
+
+# OpenTelemetry 链路追踪
+opentelemetry-api==1.24.0
+opentelemetry-sdk==1.24.0
+opentelemetry-exporter-otlp==1.24.0

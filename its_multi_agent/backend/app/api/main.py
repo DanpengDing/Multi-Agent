@@ -1,9 +1,13 @@
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+from opentelemetry.trace import get_tracer, SpanKind
+from opentelemetry.propagate import extract
+
 from api.routers import router
 from infrastructure.logging.logger import logger
+from infrastructure.tracing import setup_tracing, get_tracer
 from infrastructure.tools.mcp.mcp_manager import mcp_connect, mcp_cleanup
 
 
@@ -35,10 +39,43 @@ async def lifespan(app: FastAPI):
 
 
 def create_fast_api() -> FastAPI:
+    # 初始化链路追踪
+    tracer = get_tracer("multi-agent-api")
+
     # 1. 创建FastApi实例,绑定了生命周期事件
     app = FastAPI(title="Multi-Agent API", lifespan=lifespan)
 
-    # 2. 处理跨域
+    # 2. 添加链路追踪中间件
+    @app.middleware("http")
+    async def tracing_middleware(request: Request, call_next):
+        """链路追踪中间件，跟踪每个 HTTP 请求。"""
+        tracer = get_tracer("multi-agent-api")
+
+        # 从请求头中提取追踪上下文
+        context = extract(request.headers)
+        span_name = f"{request.method} {request.url.path}"
+
+        with tracer.start_as_current_span(
+            span_name,
+            context=context,
+            kind=SpanKind.SERVER,
+            attributes={
+                "http.method": request.method,
+                "http.url": str(request.url),
+                "http.host": request.headers.get("host", ""),
+                "http.user_agent": request.headers.get("user-agent", ""),
+            }
+        ) as span:
+            try:
+                response = await call_next(request)
+                span.set_attribute("http.status_code", response.status_code)
+                return response
+            except Exception as e:
+                span.set_attribute("http.status_code", 500)
+                span.record_exception(e)
+                raise
+
+    # 3. 处理跨域
     app.add_middleware(
         CORSMiddleware,
         # CORSMiddleware 会自动拦截后端的响应 并贴上这些标签 Access-Control-Allow-Origin Access-Control-Allow-Methods Access-Control-Allow-Headers
@@ -48,10 +85,10 @@ def create_fast_api() -> FastAPI:
         allow_headers=["*"],  # 请求头中带上自己的信息（token）
     )
 
-    # 3. 注册各种路由
+    # 4. 注册各种路由
     app.include_router(router=router)
 
-    # 4.返回创建的FastAPI
+    # 5.返回创建的FastAPI
     return app
 
 

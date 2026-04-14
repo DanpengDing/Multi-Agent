@@ -3,8 +3,11 @@ import traceback
 from collections.abc import AsyncGenerator
 
 from agents.run import RunConfig, Runner
+from opentelemetry import trace
+from opentelemetry.trace import SpanKind, Status, StatusCode
 
 from infrastructure.logging.logger import logger
+from infrastructure.tracing import get_tracer
 from multi_agent.orchestrator_agent import orchestrator_agent
 from schemas.request import ChatMessageRequest
 from schemas.response import ContentKind
@@ -40,17 +43,18 @@ class MultiAgentService:
 
     @classmethod
     async def process_task(cls, request: ChatMessageRequest, flag: bool) -> AsyncGenerator[str, None]:
-        # flag 不是业务参数，而是“本次调用是否还允许自动重试一次”的开关。
+        # flag 不是业务参数，而是”本次调用是否还允许自动重试一次”的开关。
         # 第一次从 /api/query 进入时，外层会传 flag=True，表示如果本轮中途抛异常，可以再自动补跑一次。
         # 一旦进入补跑分支，下面会把 flag 改成 False 再调用自己，这样第二次如果还失败，就不会继续无限递归。
+        tracer = get_tracer(“multi-agent-service”)
         user_id = request.context.user_id
-        session_id = request.context.session_id or ""
+        session_id = request.context.session_id or “”
         original_query = request.query
         user_query = original_query
 
         try:
             logger.info(
-                "[AgentService] start user=%s session=%s retry=%s skip_user_message=%s query=%s",
+                “[AgentService] start user=%s session=%s retry=%s skip_user_message=%s query=%s”,
                 user_id,
                 session_id,
                 flag,
@@ -59,22 +63,33 @@ class MultiAgentService:
             )
 
             # 第 1 步：先加载历史消息，再做 query rewrite。
-            # 这里的 rewrite 不是审批逻辑的一部分，只是让主调度智能体拿到更完整的“当前问题”。
-            runtime_state = await session_service.load_runtime_state(
-                user_id=user_id,
-                session_id=session_id,
-                pending_user_input=original_query,
-            )
-            base_history = session_service.build_runtime_history(runtime_state, append_user_message=False)
-            rewrite_result = await query_rewrite_service.rewrite(original_query, base_history)
-            user_query = rewrite_result.rewritten_query
-            logger.info(
-                "[AgentService] query rewritten user=%s session=%s original=%s rewritten=%s",
-                user_id,
-                session_id,
-                original_query,
-                user_query,
-            )
+            # 这里的 rewrite 不是审批逻辑的一部分，只是让主调度智能体拿到更完整的”当前问题”。
+            with tracer.start_as_current_span(
+                “query_rewrite”,
+                kind=SpanKind.INTERNAL,
+                attributes={
+                    “user.id”: user_id,
+                    “session.id”: session_id,
+                    “query.original”: original_query,
+                }
+            ) as span:
+                runtime_state = await session_service.load_runtime_state(
+                    user_id=user_id,
+                    session_id=session_id,
+                    pending_user_input=original_query,
+                )
+                base_history = session_service.build_runtime_history(runtime_state, append_user_message=False)
+                rewrite_result = await query_rewrite_service.rewrite(original_query, base_history)
+                user_query = rewrite_result.rewritten_query
+                span.set_attribute(“query.rewritten”, user_query)
+                span.set_attribute(“query.history_length”, len(base_history))
+                logger.info(
+                    “[AgentService] query rewritten user=%s session=%s original=%s rewritten=%s”,
+                    user_id,
+                    session_id,
+                    original_query,
+                    user_query,
+                )
 
             # 第 2 步：把最终 rewrite 后的 query 放入会话历史。
             # 这样主调度智能体拿到的是“本轮真正要处理的问题”。
@@ -100,21 +115,31 @@ class MultiAgentService:
 
             # 第 3 步：运行主调度智能体。
             # 这里 run_streamed 的职责只有一个：把主 Agent 的流式事件持续往外发。
-            streaming_result = Runner.run_streamed(
-                starting_agent=orchestrator_agent,
-                input=chat_history,
-                context=user_query,
-                max_turns=5,
-                run_config=RunConfig(tracing_disabled=True),
-            )
-            logger.info(
-                "[AgentService] orchestrator started user=%s session=%s",
-                user_id,
-                session_id,
-            )
+            with tracer.start_as_current_span(
+                "orchestrator.run",
+                kind=SpanKind.INTERNAL,
+                attributes={
+                    "user.id": user_id,
+                    "session.id": session_id,
+                    "orchestrator.max_turns": 5,
+                    "chat_history.length": len(chat_history),
+                }
+            ) as span:
+                streaming_result = Runner.run_streamed(
+                    starting_agent=orchestrator_agent,
+                    input=chat_history,
+                    context=user_query,
+                    max_turns=5,
+                    run_config=RunConfig(tracing_disabled=True),
+                )
+                logger.info(
+                    "[AgentService] orchestrator started user=%s session=%s",
+                    user_id,
+                    session_id,
+                )
 
-            async for chunk in process_stream_response(streaming_result):
-                yield chunk
+                async for chunk in process_stream_response(streaming_result):
+                    yield chunk
 
             # 第 4 步：流跑完后，检查官方 SDK 是否返回了审批中断。
             # 官方审批模式下，不会抛我们自定义异常，而是：
@@ -122,37 +147,46 @@ class MultiAgentService:
             # 2. run 返回 interruptions + resumable state
             interruptions = cls._extract_interruptions(streaming_result)
             if interruptions:
-                state = cls._extract_state(streaming_result)
-                logger.info(
-                    "[AgentService] approval interruption user=%s session=%s count=%d",
-                    user_id,
-                    session_id,
-                    len(interruptions),
-                )
+                with tracer.start_as_current_span(
+                    "hitl.approval_required",
+                    kind=SpanKind.INTERNAL,
+                    attributes={
+                        "user.id": user_id,
+                        "session.id": session_id,
+                        "hitl.interruption_count": len(interruptions),
+                    }
+                ):
+                    state = cls._extract_state(streaming_result)
+                    logger.info(
+                        "[AgentService] approval interruption user=%s session=%s count=%d",
+                        user_id,
+                        session_id,
+                        len(interruptions),
+                    )
 
-                pending = hitl_service.create_pending_approval(
-                    user_id=user_id,
-                    session_id=session_id,
-                    query=user_query,
-                    state=state,
-                    interruptions=interruptions,
-                    title="需要人工确认",
-                    question="是否允许智能体查询维修站并继续执行？",
-                    details=f"待执行请求：{user_query}",
-                    approve_label="允许查询",
-                    reject_label="取消操作",
-                )
+                    pending = hitl_service.create_pending_approval(
+                        user_id=user_id,
+                        session_id=session_id,
+                        query=user_query,
+                        state=state,
+                        interruptions=interruptions,
+                        title="需要人工确认",
+                        question="是否允许智能体查询维修站并继续执行？",
+                        details=f"待执行请求：{user_query}",
+                        approve_label="允许查询",
+                        reject_label="取消操作",
+                    )
 
-                yield "data: " + ResponseFactory.build_human_approval(
-                    token=pending.token,
-                    title=pending.title,
-                    question=pending.question,
-                    details=pending.details,
-                    approve_label=pending.approve_label,
-                    reject_label=pending.reject_label,
-                ).model_dump_json() + "\n\n"
-                yield "data: " + ResponseFactory.build_finish().model_dump_json() + "\n\n"
-                return
+                    yield "data: " + ResponseFactory.build_human_approval(
+                        token=pending.token,
+                        title=pending.title,
+                        question=pending.question,
+                        details=pending.details,
+                        approve_label=pending.approve_label,
+                        reject_label=pending.reject_label,
+                    ).model_dump_json() + "\n\n"
+                    yield "data: " + ResponseFactory.build_finish().model_dump_json() + "\n\n"
+                    return
 
             # 第 5 步：如果没有 interruptions，说明本轮 run 正常结束了。
             agent_result = streaming_result.final_output or ""
@@ -173,18 +207,24 @@ class MultiAgentService:
             yield "data: " + ResponseFactory.build_finish().model_dump_json() + "\n\n"
 
         except Exception as exc:
-            # 这里捕获的是“整条 process_task 链路”里的异常，
+            # 这里捕获的是”整条 process_task 链路”里的异常，
             # 比如 query rewrite、主 Agent 执行、流式事件处理等任一步骤抛错，都会进入这里。
             logger.error(
-                "[AgentService] failed user=%s session=%s query=%s error=%s",
+                “[AgentService] failed user=%s session=%s query=%s error=%s”,
                 user_id,
                 session_id,
                 original_query,
                 exc,
             )
-            logger.debug("[AgentService] traceback=%s", traceback.format_exc())
-            text = f"系统处理请求时出现异常：{exc}"
-            yield "data: " + ResponseFactory.build_text(text, ContentKind.PROCESS).model_dump_json() + "\n\n"
+            logger.debug(“[AgentService] traceback=%s”, traceback.format_exc())
+
+            # 记录异常到链路追踪
+            span = trace.get_current_span()
+            span.record_exception(exc)
+            span.set_status(trace.Status(trace.StatusCode.ERROR, str(exc)))
+
+            text = f”系统处理请求时出现异常：{exc}”
+            yield “data: “ + ResponseFactory.build_text(text, ContentKind.PROCESS).model_dump_json() + “\n\n”
 
             if flag:
                 # 第一次失败时会进入这里。

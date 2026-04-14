@@ -21,6 +21,25 @@
 
 ### Guardrail 输入过滤
 
+基于 DFA 算法的敏感词过滤机制，集成在 API 入口处。
+
+### OpenTelemetry 链路追踪
+
+基于 OpenTelemetry 的分布式追踪系统，跟踪请求在各个 Agent 间的流转：
+
+- **HTTP 请求追踪** - 每个 API 请求自动追踪
+- **Query Rewrite 追踪** - 记录查询改写过程
+- **Orchestrator 执行追踪** - 记录主调度智能体运行
+- **HITL 审批追踪** - 记录人工审批流程
+
+追踪数据默认输出到控制台（开发环境）。生产环境可配置 OTLP 导出器发送到 Jaeger/Grafana 等追踪系统。
+
+配置示例：
+```python
+from infrastructure.tracing import setup_tracing
+tracer = setup_tracing("multi-agent-service")
+```
+
 基于 DFA 算法的敏感词过滤机制，集成在 API 入口处：
 
 - **通用敏感词**：命中后直接拒绝请求
@@ -74,6 +93,7 @@ app/
 │   ├── ai/               # AI 模型客户端、提示词加载
 │   ├── database/         # MySQL 连接池
 │   ├── logging/          # 日志管理
+│   ├── tracing/          # OpenTelemetry 链路追踪
 │   └── tools/            # 工具集成（MCP、本地知识库）
 ├── multi_agent/           # 智能体层
 │   ├── orchestrator_agent.py   # 主调度智能体

@@ -2,8 +2,10 @@ from agents.run import Runner
 from fastapi.routing import APIRouter
 from starlette.responses import StreamingResponse
 from typing import AsyncGenerator
+from opentelemetry.trace import SpanKind
 
 from infrastructure.logging.logger import logger
+from infrastructure.tracing import get_tracer
 from multi_agent.orchestrator_agent import orchestrator_agent
 from schemas.request import ChatMessageRequest, HumanApprovalRequest, UserSessionsRequest
 from schemas.response import ContentKind
@@ -19,36 +21,53 @@ router = APIRouter()
 
 @router.post("/api/query", summary="流式执行智能体")
 async def query(request_context: ChatMessageRequest) -> StreamingResponse:
+    tracer = get_tracer("multi-agent-api")
     user_id = request_context.context.user_id
     user_query = request_context.query
+    session_id = request_context.context.session_id or ""
 
-    # ========== Guardrail 输入过滤 ==========
-    check_result = guardrail_service.check_input(user_query)
-    if check_result.blocked:
-        # 命中通用敏感词，直接拒绝
+    # 创建查询追踪 span
+    with tracer.start_as_current_span(
+        "agent.query",
+        kind=SpanKind.INTERNAL,
+        attributes={
+            "user.id": user_id,
+            "session.id": session_id,
+            "query.length": len(user_query),
+            "query_preview": user_query[:100] if user_query else "",
+        }
+    ) as span:
+        # ========== Guardrail 输入过滤 ==========
+        check_result = guardrail_service.check_input(user_query)
+        if check_result.blocked:
+            span.set_attribute("guardrail.blocked", True)
+            span.set_attribute("guardrail.matched_words", str(check_result.matched_common))
+            # 命中通用敏感词，直接拒绝
+            return StreamingResponse(
+                content=_blocked_stream(check_result),
+                status_code=200,
+                media_type="text/event-stream",
+            )
+        if check_result.replaced:
+            # 命中业务敏感词，使用替换后的文本
+            user_query = check_result.filtered_text
+            span.set_attribute("guardrail.replaced", True)
+            span.set_attribute("guardrail.business_words", str(check_result.matched_business))
+            logger.info(
+                "Guardrail: user=%s business_words=%s replaced_query=%s",
+                user_id,
+                check_result.matched_business,
+                user_query,
+            )
+        # ========== Guardrail 过滤结束 ==========
+
+        logger.info("user=%s query=%s", user_id, user_query)
+        async_generator_result = MultiAgentService.process_task(request_context, flag=True)
         return StreamingResponse(
-            content=_blocked_stream(check_result),
+            content=async_generator_result,
             status_code=200,
             media_type="text/event-stream",
         )
-    if check_result.replaced:
-        # 命中业务敏感词，使用替换后的文本
-        user_query = check_result.filtered_text
-        logger.info(
-            "Guardrail: user=%s business_words=%s replaced_query=%s",
-            user_id,
-            check_result.matched_business,
-            user_query,
-        )
-    # ========== Guardrail 过滤结束 ==========
-
-    logger.info("user=%s query=%s", user_id, user_query)
-    async_generator_result = MultiAgentService.process_task(request_context, flag=True)
-    return StreamingResponse(
-        content=async_generator_result,
-        status_code=200,
-        media_type="text/event-stream",
-    )
 
 
 async def _blocked_stream(check_result) -> AsyncGenerator[str, None]:
